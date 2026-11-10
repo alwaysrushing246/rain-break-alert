@@ -102,6 +102,29 @@ def save_state(state, now):
     STATE_FILE.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
 
 
+def _smtp_connect(user, password):
+    """Log in to Gmail, trying SSL on 465 first, then STARTTLS on 587."""
+    last = None
+    for port, use_ssl in ((465, True), (587, False)):
+        try:
+            if use_ssl:
+                smtp = smtplib.SMTP_SSL("smtp.gmail.com", port, timeout=30)
+            else:
+                smtp = smtplib.SMTP("smtp.gmail.com", port, timeout=30)
+                smtp.ehlo()
+                smtp.starttls()
+                smtp.ehlo()
+            smtp.login(user, password)
+            return smtp
+        except smtplib.SMTPAuthenticationError as e:
+            print(f"Gmail rejected the login (port {port}): {e}", file=sys.stderr)
+            raise  # wrong user or app password; another port won't help
+        except (smtplib.SMTPException, OSError) as e:
+            print(f"SMTP port {port} failed: {type(e).__name__}: {e}", file=sys.stderr)
+            last = e
+    raise last
+
+
 def send_sms(body, dry_run=False):
     """Text every gateway address in SMS_TO (comma-separated, e.g.
     5035551234@vtext.com,3605559876@tmomail.net) using Gmail SMTP.
@@ -111,25 +134,34 @@ def send_sms(body, dry_run=False):
     if dry_run:
         print(f"[dry-run] SMS: {body}")
         return 1
-    user = os.environ["GMAIL_USER"]
-    password = os.environ["GMAIL_APP_PASSWORD"]
-    addresses = [a.strip() for a in os.environ["SMS_TO"].split(",") if a.strip()]
+    user = os.environ.get("GMAIL_USER", "").strip()
+    password = os.environ.get("GMAIL_APP_PASSWORD", "").replace(" ", "").strip()
+    addresses = [a.strip() for a in os.environ.get("SMS_TO", "").split(",") if a.strip()]
+    if not user or not password or not addresses:
+        print(
+            "Missing secret(s): "
+            f"GMAIL_USER={'ok' if user else 'EMPTY'}, "
+            f"GMAIL_APP_PASSWORD={'ok' if password else 'EMPTY'}, "
+            f"SMS_TO={'ok' if addresses else 'EMPTY'}",
+            file=sys.stderr,
+        )
+        return 0
     ok = 0
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as smtp:
-            smtp.login(user, password)
-            for to in addresses:
-                msg = EmailMessage()  # no subject: the body is the whole text
-                msg["From"] = user
-                msg["To"] = to
-                msg.set_content(body)
-                try:
-                    smtp.send_message(msg)
-                    ok += 1
-                except smtplib.SMTPException as e:  # one bad address must not block the other
-                    print(f"SMS to {to.split('@')[0][-4:]} failed: {e}", file=sys.stderr)
-    except (smtplib.SMTPException, OSError) as e:
-        print(f"SMTP connection/login failed: {e}", file=sys.stderr)
+        smtp = _smtp_connect(user, password)
+    except (smtplib.SMTPException, OSError):
+        return 0
+    with smtp:
+        for to in addresses:
+            msg = EmailMessage()  # no subject: the body is the whole text
+            msg["From"] = user
+            msg["To"] = to
+            msg.set_content(body)
+            try:
+                smtp.send_message(msg)
+                ok += 1
+            except smtplib.SMTPException as e:  # one bad address must not block the other
+                print(f"SMS to {to.split('@')[0][-4:]} failed: {e}", file=sys.stderr)
     return ok
 
 
