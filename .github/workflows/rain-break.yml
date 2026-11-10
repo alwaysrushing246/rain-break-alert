@@ -52,7 +52,11 @@ jobs:
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_FROM: ${{ secrets.TWILIO_FROM }}
           SMS_TO: ${{ secrets.SMS_TO }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
 
       - name: Check for rain break
         if: steps.window.outputs.active == 'true' && !inputs.test_sms
@@ -60,7 +64,11 @@ jobs:
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_FROM: ${{ secrets.TWILIO_FROM }}
           SMS_TO: ${{ secrets.SMS_TO }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
 
       - name: Save dedup state
         if: steps.window.outputs.active == 'true'
