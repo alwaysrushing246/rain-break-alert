@@ -2,7 +2,7 @@
 """Text me when a rain break starts in ZIP 98664 (Vancouver, WA), 8 AM - 6 PM Pacific.
 
 Data: Open-Meteo 15-minute precipitation (free, no API key).
-Alerts: SMS only (via Twilio) to every number in SMS_TO; one text at a 30+ minute dry
+Alerts: SMS only (carrier email-to-text gateway) to every address in SMS_TO; one text at a 30+ minute dry
 window, one upgrade text at a 2+ hour dry window.
 Usage:  python rain_break_alert.py            # normal run
         python rain_break_alert.py --dry-run  # print instead of texting, ignore time-of-day
@@ -10,12 +10,12 @@ Usage:  python rain_break_alert.py            # normal run
 """
 import json
 import os
-import base64
+import smtplib
 import sys
-import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta
+from email.message import EmailMessage
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -103,28 +103,33 @@ def save_state(state, now):
 
 
 def send_sms(body, dry_run=False):
-    """Text every number in SMS_TO (comma-separated, E.164 like +15035551234).
+    """Text every gateway address in SMS_TO (comma-separated, e.g.
+    5035551234@vtext.com,3605559876@tmomail.net) using Gmail SMTP.
 
-    Returns how many numbers were texted successfully.
+    Returns how many addresses were texted successfully.
     """
     if dry_run:
         print(f"[dry-run] SMS: {body}")
         return 1
-    sid = os.environ["TWILIO_ACCOUNT_SID"]
-    token = os.environ["TWILIO_AUTH_TOKEN"]
-    sender = os.environ["TWILIO_FROM"]
-    numbers = [n.strip() for n in os.environ["SMS_TO"].split(",") if n.strip()]
-    auth = base64.b64encode(f"{sid}:{token}".encode()).decode()
-    url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json"
+    user = os.environ["GMAIL_USER"]
+    password = os.environ["GMAIL_APP_PASSWORD"]
+    addresses = [a.strip() for a in os.environ["SMS_TO"].split(",") if a.strip()]
     ok = 0
-    for to in numbers:
-        data = urllib.parse.urlencode({"To": to, "From": sender, "Body": body}).encode()
-        req = urllib.request.Request(url, data=data, headers={"Authorization": f"Basic {auth}"})
-        try:
-            urllib.request.urlopen(req, timeout=30).read()
-            ok += 1
-        except urllib.error.URLError as e:  # keep going so one bad number doesn't block the other
-            print(f"SMS to {to[-4:]} failed: {e}", file=sys.stderr)
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as smtp:
+            smtp.login(user, password)
+            for to in addresses:
+                msg = EmailMessage()  # no subject: the body is the whole text
+                msg["From"] = user
+                msg["To"] = to
+                msg.set_content(body)
+                try:
+                    smtp.send_message(msg)
+                    ok += 1
+                except smtplib.SMTPException as e:  # one bad address must not block the other
+                    print(f"SMS to {to.split('@')[0][-4:]} failed: {e}", file=sys.stderr)
+    except (smtplib.SMTPException, OSError) as e:
+        print(f"SMTP connection/login failed: {e}", file=sys.stderr)
     return ok
 
 
