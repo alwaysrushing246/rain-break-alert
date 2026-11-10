@@ -2,16 +2,21 @@
 """Text me when a rain break starts in ZIP 98664 (Vancouver, WA), 8 AM - 6 PM Pacific.
 
 Data: Open-Meteo 15-minute precipitation (free, no API key).
-Alerts: SMS only (carrier email-to-text gateway) to every address in SMS_TO; one text at a 30+ minute dry
-window, one upgrade text at a 2+ hour dry window.
+Alerts, any combination of:
+  - NTFY_TOPIC: free push notification to every phone subscribed to that topic in the ntfy app.
+  - SMS_TO: comma-separated list. An entry with "@" is a carrier email-to-text address (sent through
+    Gmail); an entry without "@" is a phone number like +15035551234 (sent through Twilio).
+One alert at a 30+ minute dry window, one upgrade alert at 2+ hours.
 Usage:  python rain_break_alert.py            # normal run
         python rain_break_alert.py --dry-run  # print instead of texting, ignore time-of-day
         python rain_break_alert.py --test-sms # send a test text
 """
+import base64
 import json
 import os
 import smtplib
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta
@@ -138,24 +143,15 @@ def _smtp_connect(user, password):
     raise last
 
 
-def send_sms(body, dry_run=False):
-    """Text every gateway address in SMS_TO (comma-separated, e.g.
-    5035551234@vtext.com,3605559876@tmomail.net) using Gmail SMTP.
-
-    Returns how many addresses were texted successfully.
-    """
-    if dry_run:
-        print(f"[dry-run] SMS: {body}")
-        return 1
+def _send_gateway(body, addresses):
+    """Carrier email-to-text via Gmail SMTP. Returns number of successes."""
     user = os.environ.get("GMAIL_USER", "").strip()
     password = os.environ.get("GMAIL_APP_PASSWORD", "").replace(" ", "").strip()
-    addresses = [a.strip() for a in os.environ.get("SMS_TO", "").split(",") if a.strip()]
-    if not user or not password or not addresses:
+    if not user or not password:
         print(
-            "Missing secret(s): "
+            "Missing Gmail secret(s): "
             f"GMAIL_USER={'ok' if user else 'EMPTY'}, "
-            f"GMAIL_APP_PASSWORD={'ok' if password else 'EMPTY'}, "
-            f"SMS_TO={'ok' if addresses else 'EMPTY'}",
+            f"GMAIL_APP_PASSWORD={'ok' if password else 'EMPTY'}",
             file=sys.stderr,
         )
         return 0
@@ -175,6 +171,83 @@ def send_sms(body, dry_run=False):
                 ok += 1
             except smtplib.SMTPException as e:  # one bad address must not block the other
                 print(f"SMS to {to.split('@')[0][-4:]} failed: {e}", file=sys.stderr)
+    return ok
+
+
+def _send_twilio(body, numbers):
+    """Real SMS through Twilio's API. Returns number of successes."""
+    sid = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
+    token = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
+    sender = os.environ.get("TWILIO_FROM", "").strip()
+    if not (sid and token and sender):
+        print(
+            "Missing Twilio secret(s): "
+            f"TWILIO_ACCOUNT_SID={'ok' if sid else 'EMPTY'}, "
+            f"TWILIO_AUTH_TOKEN={'ok' if token else 'EMPTY'}, "
+            f"TWILIO_FROM={'ok' if sender else 'EMPTY'}",
+            file=sys.stderr,
+        )
+        return 0
+    auth = base64.b64encode(f"{sid}:{token}".encode()).decode()
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json"
+    ok = 0
+    for to in numbers:
+        data = urllib.parse.urlencode({"To": to, "From": sender, "Body": body}).encode()
+        req = urllib.request.Request(url, data=data, headers={"Authorization": f"Basic {auth}"})
+        try:
+            urllib.request.urlopen(req, timeout=30).read()
+            ok += 1
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")[:300]
+            print(f"SMS to ...{to[-4:]} failed: HTTP {e.code} {detail}", file=sys.stderr)
+        except (urllib.error.URLError, OSError) as e:
+            print(f"SMS to ...{to[-4:]} failed: {e}", file=sys.stderr)
+    return ok
+
+
+def _send_ntfy(body):
+    """Free push notification through ntfy.sh to every phone subscribed to the topic."""
+    topic = os.environ.get("NTFY_TOPIC", "").strip().strip("/")
+    if not topic:
+        return 0
+    req = urllib.request.Request(
+        f"https://ntfy.sh/{urllib.parse.quote(topic)}",
+        data=body.encode("utf-8"),
+        headers={"Title": "Rain break", "Priority": "high", "Tags": "umbrella"},
+        method="POST",
+    )
+    try:
+        urllib.request.urlopen(req, timeout=30).read()
+        return 1
+    except urllib.error.HTTPError as e:
+        print(f"ntfy failed: HTTP {e.code} {e.read().decode(errors='replace')[:200]}", file=sys.stderr)
+    except (urllib.error.URLError, OSError) as e:
+        print(f"ntfy failed: {e}", file=sys.stderr)
+    return 0
+
+
+def send_sms(body, dry_run=False):
+    """Alert every configured channel. Returns the number of successful deliveries."""
+    if dry_run:
+        print(f"[dry-run] ALERT: {body}")
+        return 1
+    targets = [t.strip() for t in os.environ.get("SMS_TO", "").split(",") if t.strip()]
+    has_ntfy = bool(os.environ.get("NTFY_TOPIC", "").strip())
+    if not targets and not has_ntfy:
+        print("Nothing configured: set NTFY_TOPIC and/or SMS_TO.", file=sys.stderr)
+        return 0
+    gateways = [t for t in targets if "@" in t]
+    phones = [t for t in targets if "@" not in t]
+    ok = 0
+    if has_ntfy:
+        n = _send_ntfy(body)
+        print(f"ntfy push: {'sent' if n else 'FAILED'}")
+        ok += n
+    if phones:
+        ok += _send_twilio(body, phones)
+    if gateways:
+        ok += _send_gateway(body, gateways)
+    print(f"Delivered {ok} alert(s) across {len(targets) + int(has_ntfy)} channel(s)/recipient(s).")
     return ok
 
 
