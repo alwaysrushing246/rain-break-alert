@@ -37,6 +37,11 @@ LONG_WINDOW_MIN = 120              # second alert tier
 LEAD_SLOTS = 2                     # alert up to 2 x 15 min before the break starts
 GRACE_SLOTS = 2                    # still alert up to 2 x 15 min after it started (covers delayed runs)
 WET_MM = 0.0                       # a 15-min slot is "wet" if precip > this (mm)
+# Tomorrow.io rain fields to read (mm/hr); the first present value(s) are used. If none exist but a
+# precipitationProbability does, a minute counts as wet at or above PROB_WET_PCT percent.
+INTENSITY_FIELDS = ("precipitationIntensity", "rainIntensity", "freezingRainIntensity",
+                    "sleetIntensity", "snowIntensity")
+PROB_WET_PCT = 50
 STATE_FILE = Path(__file__).with_name("state.json")
 # --------------------------------------------------------------------------
 
@@ -75,22 +80,42 @@ def fetch_tomorrow(key, location=ZIP_LOCATION):
     )
     with urllib.request.urlopen(req, timeout=30) as r:
         data = json.load(r)
+    items = data["timelines"].get("minutely", [])
+    keys = sorted(items[0]["values"].keys()) if items else []
+    print(f"Tomorrow.io minutely fields: {', '.join(keys) or '(none)'}")
+
+    def has_intensity(v):
+        return any(v.get(f) is not None for f in INTENSITY_FIELDS)
+
+    use_prob = (
+        bool(items)
+        and not any(has_intensity(i["values"]) for i in items)
+        and any(i["values"].get("precipitationProbability") is not None for i in items)
+    )
+    if use_prob:
+        print(f"No rain-intensity field; using precipitationProbability >= {PROB_WET_PCT}% as rain.")
+
     buckets = {}
-    points = with_rain_field = 0
+    usable = 0
     peak = 0.0
-    for item in data["timelines"].get("minutely", []):
-        points += 1
-        raw = item["values"].get("precipitationIntensity")
-        if raw is None:  # field missing: unknown, NOT "dry"; skip so Open-Meteo is kept for that slot
-            continue
-        with_rain_field += 1
-        peak = max(peak, float(raw))
+    for item in items:
+        v = item["values"]
+        if use_prob:
+            pp = v.get("precipitationProbability")
+            if pp is None:
+                continue
+            raw = 1.0 if float(pp) >= PROB_WET_PCT else 0.0  # treated as mm/hr
+        else:
+            vals = [float(v[f]) for f in INTENSITY_FIELDS if v.get(f) is not None]
+            if not vals:  # unknown, NOT dry: skip so Open-Meteo is kept for that slot
+                continue
+            raw = max(vals)
+        usable += 1
+        peak = max(peak, raw)
         t = datetime.fromisoformat(item["time"].replace("Z", "+00:00")).astimezone(TZ)
-        mm = float(raw) / 60.0  # mm/hr -> mm/min
         slot = t.replace(minute=(t.minute // 15) * 15, second=0, microsecond=0)
-        buckets[slot] = buckets.get(slot, 0.0) + mm
-    print(f"Tomorrow.io: {points} minutely points, {with_rain_field} with precipitationIntensity, "
-          f"peak {peak:.2f} mm/h")
+        buckets[slot] = buckets.get(slot, 0.0) + raw / 60.0  # mm/hr -> mm/min
+    print(f"Tomorrow.io: {len(items)} minutely points, {usable} usable, peak {peak:.2f} mm/h")
     return sorted(buckets.items())
 
 
