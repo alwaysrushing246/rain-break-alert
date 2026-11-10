@@ -32,6 +32,7 @@ LAST_DAY = date(2027, 4, 30)       # last day alerts are sent; silent after this
 MIN_WINDOW_MIN = 30                # first alert tier
 LONG_WINDOW_MIN = 120              # second alert tier
 LEAD_SLOTS = 2                     # alert up to 2 x 15 min before the break starts
+GRACE_SLOTS = 2                    # still alert up to 2 x 15 min after it started (covers delayed runs)
 WET_MM = 0.0                       # a 15-min slot is "wet" if precip > this (mm)
 STATE_FILE = Path(__file__).with_name("state.json")
 # --------------------------------------------------------------------------
@@ -58,7 +59,7 @@ def fetch_slots():
 
 
 def find_break(slots, now):
-    """Return (start, end, minutes) for a rain break starting now or very soon, else None.
+    """Return (start, end, minutes_left) for a rain break starting soon or just started, else None.
 
     A 'break' = a run of dry slots immediately preceded by a wet slot, so a
     dry sunny day does not text you all day.
@@ -67,7 +68,7 @@ def find_break(slots, now):
     day_end = now.replace(hour=DAY_END, minute=0, second=0, microsecond=0)
     wet = [p > WET_MM for _, p in slots]
 
-    for d in range(max(cur, 1), min(cur + LEAD_SLOTS, len(slots) - 1) + 1):
+    for d in range(max(cur - GRACE_SLOTS, 1), min(cur + LEAD_SLOTS, len(slots) - 1) + 1):
         if wet[d] or not wet[d - 1]:
             continue
         start = slots[d][0]
@@ -77,10 +78,19 @@ def find_break(slots, now):
         while i < len(slots) and not wet[i] and slots[i][0] < day_end:
             i += 1
         end = slots[i][0] if i < len(slots) else slots[-1][0] + SLOT
-        minutes = int((end - start).total_seconds() // 60)
+        remaining_from = max(start, slots[cur][0])  # don't count time that already passed
+        minutes = int((end - remaining_from).total_seconds() // 60)
         if minutes >= MIN_WINDOW_MIN:
             return start, end, minutes
     return None
+
+
+def forecast_line(slots, now):
+    """One log line showing recent and upcoming 15-min slots: * = rain, - = dry."""
+    cur = max(i for i, (t, _) in enumerate(slots) if t <= now)
+    part = slots[max(cur - 2, 0):cur + 13]
+    cells = " ".join(f"{t:%H:%M}{'*' if p > WET_MM else '-'}" for t, p in part)
+    return f"Forecast (* = rain, - = dry): {cells}"
 
 
 def fmt_time(dt):
@@ -267,11 +277,13 @@ def main():
         return
 
     slots = fetch_slots()
+    print(forecast_line(slots, now))
     result = find_break(slots, now)
     state = load_state()
 
     if not result:
-        print(f"{now:%H:%M} no qualifying rain break.")
+        print(f"{now:%H:%M} no rain break of {MIN_WINDOW_MIN}+ min starting within "
+              f"the next {LEAD_SLOTS * 15} min (or begun in the last {GRACE_SLOTS * 15}), so no alert.")
         save_state(state, now)
         return
 
