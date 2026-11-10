@@ -62,6 +62,7 @@ jobs:
         if: steps.window.outputs.active == 'true' && !inputs.test_sms
         run: python rain_break_alert.py
         env:
+          TOMORROW_API_KEY: ${{ secrets.TOMORROW_API_KEY }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
