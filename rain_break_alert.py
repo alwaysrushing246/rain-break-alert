@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Text me when a rain break starts in ZIP 98664 (Vancouver, WA), 8 AM - 6 PM Pacific.
 
-Data: Open-Meteo 15-minute precipitation (free, no API key).
+Data: Open-Meteo 15-minute precipitation (free, no API key). If TOMORROW_API_KEY is set, Tomorrow.io's
+minute-by-minute nowcast (free key) replaces Open-Meteo for the next hour, which is usually closer to
+what radar-based phone weather apps show.
 Alerts, any combination of:
   - NTFY_TOPIC: free push notification to every phone subscribed to that topic in the ntfy app.
   - SMS_TO: comma-separated list. An entry with "@" is a carrier email-to-text address (sent through
@@ -58,6 +60,35 @@ def fetch_slots():
     ]
 
 
+def fetch_tomorrow(key):
+    """Tomorrow.io minute-by-minute nowcast (next ~60 min), bucketed into 15-min slots (mm)."""
+    qs = urllib.parse.urlencode({
+        "location": f"{LAT},{LON}",
+        "timesteps": "1m",
+        "units": "metric",
+        "apikey": key,
+    })
+    req = urllib.request.Request(
+        f"https://api.tomorrow.io/v4/weather/forecast?{qs}",
+        headers={"accept": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
+        data = json.load(r)
+    buckets = {}
+    for item in data["timelines"]["minutely"]:
+        t = datetime.fromisoformat(item["time"].replace("Z", "+00:00")).astimezone(TZ)
+        mm = float(item["values"].get("precipitationIntensity") or 0.0) / 60.0  # mm/hr -> mm/min
+        slot = t.replace(minute=(t.minute // 15) * 15, second=0, microsecond=0)
+        buckets[slot] = buckets.get(slot, 0.0) + mm
+    return sorted(buckets.items())
+
+
+def merge_nowcast(slots, nowcast):
+    """Use the nowcast for any slot it covers; keep Open-Meteo for the rest."""
+    override = dict(nowcast)
+    return [(t, override.get(t, p)) for t, p in slots]
+
+
 def find_break(slots, now):
     """Return (start, end, minutes_left) for a rain break starting soon or just started, else None.
 
@@ -85,12 +116,15 @@ def find_break(slots, now):
     return None
 
 
-def forecast_line(slots, now):
-    """One log line showing recent and upcoming 15-min slots: * = rain, - = dry."""
-    cur = max(i for i, (t, _) in enumerate(slots) if t <= now)
+def forecast_line(label, slots, now):
+    """One log line of 15-min slots near now: * = rain, - = dry."""
+    if not slots:
+        return f"{label}: (no data)"
+    idx = [i for i, (t, _) in enumerate(slots) if t <= now]
+    cur = idx[-1] if idx else 0
     part = slots[max(cur - 2, 0):cur + 13]
     cells = " ".join(f"{t:%H:%M}{'*' if p > WET_MM else '-'}" for t, p in part)
-    return f"Forecast (* = rain, - = dry): {cells}"
+    return f"{label} (* = rain, - = dry): {cells}"
 
 
 def fmt_time(dt):
@@ -277,7 +311,18 @@ def main():
         return
 
     slots = fetch_slots()
-    print(forecast_line(slots, now))
+    print(forecast_line("Open-Meteo", slots, now))
+    tomorrow_key = os.environ.get("TOMORROW_API_KEY", "").strip()
+    if tomorrow_key:
+        try:
+            nowcast = fetch_tomorrow(tomorrow_key)
+            print(forecast_line("Tomorrow.io nowcast", nowcast, now))
+            slots = merge_nowcast(slots, nowcast)
+            print(forecast_line("Used for alerts", slots, now))
+        except urllib.error.HTTPError as e:
+            print(f"Tomorrow.io failed (HTTP {e.code}); using Open-Meteo only.", file=sys.stderr)
+        except (urllib.error.URLError, OSError, KeyError, ValueError) as e:
+            print(f"Tomorrow.io failed ({type(e).__name__}: {e}); using Open-Meteo only.", file=sys.stderr)
     result = find_break(slots, now)
     state = load_state()
 
