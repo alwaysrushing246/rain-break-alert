@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo
 # ---- Settings you may want to tweak -------------------------------------
 TZ = ZoneInfo("America/Los_Angeles")
 LAT, LON = 45.6195, -122.5772      # center of ZIP 98664 (east Vancouver, WA)
+ZIP_LOCATION = "98664 US"          # Tomorrow.io looks up this ZIP itself (falls back to LAT/LON)
 DAY_START, DAY_END = 8, 18         # 8 AM to 6 PM local
 LAST_DAY = date(2027, 4, 30)       # last day alerts are sent; silent after this
 MIN_WINDOW_MIN = 30                # first alert tier
@@ -60,10 +61,10 @@ def fetch_slots():
     ]
 
 
-def fetch_tomorrow(key):
+def fetch_tomorrow(key, location=ZIP_LOCATION):
     """Tomorrow.io minute-by-minute nowcast (next ~60 min), bucketed into 15-min slots (mm)."""
     qs = urllib.parse.urlencode({
-        "location": f"{LAT},{LON}",
+        "location": location,
         "timesteps": "1m",
         "units": "metric",
         "apikey": key,
@@ -75,11 +76,21 @@ def fetch_tomorrow(key):
     with urllib.request.urlopen(req, timeout=30) as r:
         data = json.load(r)
     buckets = {}
-    for item in data["timelines"]["minutely"]:
+    points = with_rain_field = 0
+    peak = 0.0
+    for item in data["timelines"].get("minutely", []):
+        points += 1
+        raw = item["values"].get("precipitationIntensity")
+        if raw is None:  # field missing: unknown, NOT "dry"; skip so Open-Meteo is kept for that slot
+            continue
+        with_rain_field += 1
+        peak = max(peak, float(raw))
         t = datetime.fromisoformat(item["time"].replace("Z", "+00:00")).astimezone(TZ)
-        mm = float(item["values"].get("precipitationIntensity") or 0.0) / 60.0  # mm/hr -> mm/min
+        mm = float(raw) / 60.0  # mm/hr -> mm/min
         slot = t.replace(minute=(t.minute // 15) * 15, second=0, microsecond=0)
         buckets[slot] = buckets.get(slot, 0.0) + mm
+    print(f"Tomorrow.io: {points} minutely points, {with_rain_field} with precipitationIntensity, "
+          f"peak {peak:.2f} mm/h")
     return sorted(buckets.items())
 
 
@@ -315,10 +326,20 @@ def main():
     tomorrow_key = os.environ.get("TOMORROW_API_KEY", "").strip()
     if tomorrow_key:
         try:
-            nowcast = fetch_tomorrow(tomorrow_key)
-            print(forecast_line("Tomorrow.io nowcast", nowcast, now))
-            slots = merge_nowcast(slots, nowcast)
-            print(forecast_line("Used for alerts", slots, now))
+            try:
+                nowcast = fetch_tomorrow(tomorrow_key, ZIP_LOCATION)
+                print(f"Tomorrow.io location: {ZIP_LOCATION}")
+            except urllib.error.HTTPError as e:
+                if e.code not in (400, 404):
+                    raise
+                print(f"Tomorrow.io rejected '{ZIP_LOCATION}' (HTTP {e.code}); using coordinates.")
+                nowcast = fetch_tomorrow(tomorrow_key, f"{LAT},{LON}")
+            if nowcast:
+                print(forecast_line("Tomorrow.io nowcast", nowcast, now))
+                slots = merge_nowcast(slots, nowcast)
+                print(forecast_line("Used for alerts", slots, now))
+            else:
+                print("Tomorrow.io returned no usable rain readings; using Open-Meteo only.")
         except urllib.error.HTTPError as e:
             print(f"Tomorrow.io failed (HTTP {e.code}); using Open-Meteo only.", file=sys.stderr)
         except (urllib.error.URLError, OSError, KeyError, ValueError) as e:
