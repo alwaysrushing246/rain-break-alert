@@ -84,9 +84,22 @@ def fmt_time(dt):
 
 def fmt_len(minutes):
     h, m = divmod(minutes, 60)
-    if h and m:
-        return f"{h}h {m}m"
-    return f"{h}h" if h else f"{m}m"
+    parts = []
+    if h:
+        parts.append(f"{h} hr")
+    if m:
+        parts.append(f"{m} min")
+    return " ".join(parts)
+
+
+def build_message(start, end, minutes, now, update=False):
+    """Text that leads with how long the break will last."""
+    length = fmt_len(minutes)
+    if start <= now + timedelta(minutes=7):
+        core = f"no rain for the next {length} (until ~{fmt_time(end)})."
+    else:
+        core = f"rain stops ~{fmt_time(start)}, then dry for {length} (until ~{fmt_time(end)})."
+    return ("Rain break update: " if update else "Rain break: ") + core
 
 
 def load_state():
@@ -194,13 +207,11 @@ def main():
     sent = state["sent"].setdefault(key, [])
 
     if minutes >= LONG_WINDOW_MIN and "long" not in sent:
-        body = (f"Rain break: rain stops around {fmt_time(start)}. "
-                f"Dry for 2+ hours, until ~{fmt_time(end)} ({fmt_len(minutes)}).")
+        body = build_message(start, end, minutes, now, update=bool(sent))
         if send_sms(body, dry_run):
             sent += ["short", "long"]
     elif minutes >= MIN_WINDOW_MIN and "short" not in sent and "long" not in sent:
-        body = (f"Rain break: dry from {fmt_time(start)} "
-                f"until ~{fmt_time(end)} ({fmt_len(minutes)}).")
+        body = build_message(start, end, minutes, now)
         if send_sms(body, dry_run):
             sent.append("short")
     else:
