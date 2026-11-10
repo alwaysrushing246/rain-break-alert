@@ -1,1 +1,73 @@
+name: Rain break alert
+
+on:
+  schedule:
+    # Every 15 min, 15:00-02:59 UTC. Covers 8 AM-6 PM Pacific in both PST and PDT;
+    # the script itself skips anything outside 8 AM-6 PM local time.
+    - cron: "*/15 0-2,15-23 * * *"
+  workflow_dispatch:
+    inputs:
+      test_sms:
+        description: "Send a test text to both numbers instead of checking the weather"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # lets the job commit state.json (dedup memory)
+  actions: write    # lets the job disable itself after the end date
+
+concurrency:
+  group: rain-break
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Stop after end date (April 30, 2027)
+        id: window
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [ "$(TZ=America/Los_Angeles date +%Y%m%d)" -gt 20270430 ]; then
+            echo "Past end date; disabling this workflow."
+            gh workflow disable rain-break.yml
+            echo "active=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "active=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.window.outputs.active == 'true'
+
+      - uses: actions/setup-python@v5
+        if: steps.window.outputs.active == 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Send test text
+        if: steps.window.outputs.active == 'true' && inputs.test_sms
+        run: python rain_break_alert.py --test-sms
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          SMS_TO: ${{ secrets.SMS_TO }}
+
+      - name: Check for rain break
+        if: steps.window.outputs.active == 'true' && !inputs.test_sms
+        run: python rain_break_alert.py
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          SMS_TO: ${{ secrets.SMS_TO }}
+
+      - name: Save dedup state
+        if: steps.window.outputs.active == 'true'
+        run: |
+          git config user.name "rain-break-bot"
+          git config user.email "rain-break-bot@users.noreply.github.com"
+          git add state.json
+          git diff --cached --quiet || (git commit -m "Update alert state" && git push)
+
 
