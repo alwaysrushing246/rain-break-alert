@@ -136,7 +136,8 @@ def send_sms(body, dry_run=False):
 def main():
     dry_run = "--dry-run" in sys.argv
     if "--test-sms" in sys.argv:
-        send_sms("Rain-break alert test: texts are working.", dry_run)
+        if not send_sms("Rain-break alert test: texts are working.", dry_run):
+            sys.exit("Test text failed: no message was sent. Check the secrets.")
         return
 
     now = datetime.now(TZ)
